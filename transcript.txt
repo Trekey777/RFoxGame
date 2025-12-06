@@ -1,0 +1,35 @@
+Sample walkthrough (shortened):
+
+Welcome to TuFox!
+You are the fox. Eliminate rabbits until only one remains.
+Commands:
+  move(Room).
+  look.
+  status.
+  perform(Task).
+  kill(Target).
+  inspect(Target).
+  call_meeting.
+  vote(Target).
+  wait.
+
+?- look.
+You are in the kitchen.
+Connected rooms: [living_room]
+Others here: [bunny3]
+Active tasks here: [collect_food]
+
+?- kill(bunny3).
+You eliminated bunny3!
+... (AI turns and cooldowns tick)
+
+?- move(living_room).
+You moved to living_room.
+Others here: [bunny2]
+Active tasks here: [fix_wiring]
+
+?- kill(bunny2).
+You eliminated bunny2!
+
+AI detective inspects and calls a meeting when the fox is revealed; voting will eject the fox if discovered.
+Continue eliminating rabbits while avoiding discovery to win.
