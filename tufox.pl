@@ -212,6 +212,7 @@ kill(Target) :-
     ; resolve_target(Target, Resolved),
       location(player,Room), location(Resolved,Room), alive(Resolved), Resolved \= player ->
         retract(alive(Resolved)),
+        release_tasks_for(Resolved),
         assertz(body(Room,Resolved)),
         retract(cooldown(player,kill,_)),
         assertz(cooldown(player,kill,3)),
@@ -418,9 +419,10 @@ find_path(Start,Goal,Visited,Next) :-
 
 resolve_meeting :-
     write('--- Meeting called ---'),nl,
-    retractall(body(_,_)),
+    clear_bodies,
     run_votes,
     update_meeting_timer,
+    clear_bodies,
     !.
 
 run_votes :-
@@ -473,6 +475,7 @@ count_targets([H|T], Counts) :-
 eliminate(Target) :-
     alive(Target),
     retract(alive(Target)),
+    release_tasks_for(Target),
     visible_name(Target, VisibleTarget),
     (   Target == player
     ->  format('~w is ejected!~n',[VisibleTarget]),
@@ -490,6 +493,9 @@ update_meeting_timer :-
     assertz(next_meeting(NM)),
     retractall(vote(_,_)),
     !.
+
+clear_bodies :-
+    retractall(body(_,_)).
 
 % world tick: cooldown reductions and task progress persistence
 
@@ -511,7 +517,17 @@ decrement_cooldowns :-
         assertz(cooldown(Char,Skill,New))
     )),
     forall(task(T,R,N,Rem,in_progress,Occ), (
-        progress_task(T,R,Occ)
+        (   alive(Occ)
+        ->  progress_task(T,R,Occ)
+        ;   retract(task(T,R,N,Rem,in_progress,Occ)),
+            assertz(task(T,R,N,Rem,available,none))
+        )
+    )).
+
+release_tasks_for(Actor) :-
+    forall(task(T,R,N,Rem,in_progress,Actor), (
+        retract(task(T,R,N,Rem,in_progress,Actor)),
+        assertz(task(T,R,N,Rem,available,none))
     )).
 
 % Planner integration (fallback plan if planner not available)
