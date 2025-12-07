@@ -3,6 +3,7 @@
 :- use_module(library(readutil)).
 :- use_module(library(random)).
 :- use_module(library(apply)).
+:- use_module(library(lists)).
 
 :- dynamic location/2.
 :- dynamic alive/1.
@@ -17,28 +18,47 @@
 :- dynamic vote/2.
 :- dynamic alias/2.
 
-rooms([kitchen,living_room,bathroom,bedroom,balcony]).
+rooms([
+    'Tower','Library','Armory','Observatory',
+    'Hall','Dining Room','Kitchen','Storage',
+    'Study','Throne Room','Bathroom','Bedroom',
+    'Chapel','Dungeon','Wine Cellar','Balcony'
+]).
 
-% bi-directional edges
-path(kitchen,living_room).
-path(living_room,kitchen).
-path(living_room,bathroom).
-path(bathroom,living_room).
-path(living_room,bedroom).
-path(bedroom,living_room).
-path(bedroom,balcony).
-path(balcony,bedroom).
+rooms_grid([
+    ['Tower','Library','Armory','Observatory'],
+    ['Hall','Dining Room','Kitchen','Storage'],
+    ['Study','Throne Room','Bathroom','Bedroom'],
+    ['Chapel','Dungeon','Wine Cellar','Balcony']
+]).
 
 % task(TaskId, Room, NeededRounds, RemainingRounds, Status, Occupant)
-% Increase NeededRounds to give the fox more time to act before rabbits auto-win.
-% Prior values (2/3/2) let coordinated rabbits clear objectives in just a few cycles;
-% bumping them roughly doubles the work while keeping relative difficulty between
-% rooms similar.
-initial_tasks([
-    task(collect_food,kitchen,4,4,available,none),
-    task(fix_wiring,living_room,5,5,available,none),
-    task(clean_vent,bedroom,4,4,available,none)
+task_specs([
+    spec(collect_food,4),
+    spec(fix_wiring,5),
+    spec(clean_vent,4),
+    spec(fix_chandelier,3),
+    spec('Organize Ancient Scrolls',2)
 ]).
+
+assign_tasks_to_rooms :-
+    task_specs(Specs),
+    rooms(Rooms),
+    random_permutation(Rooms, Shuffled),
+    length(Specs, Count),
+    take(Count, Shuffled, SelectedRooms),
+    assign_spec_to_room(Specs, SelectedRooms).
+
+assign_spec_to_room([], []).
+assign_spec_to_room([spec(Task,Need)|Specs], [Room|Rooms]) :-
+    assertz(task(Task,Room,Need,Need,available,none)),
+    assign_spec_to_room(Specs, Rooms).
+
+take(0, _, []).
+take(N, [H|T], [H|Rest]) :-
+    N > 0,
+    N1 is N-1,
+    take(N1, T, Rest).
 
 characters([player,bunny1,bunny2,bunny3,bunny4,detective]).
 role(player,fox).
@@ -60,14 +80,10 @@ start :-
 print_help :-
     nl,
     write('Commands:'),nl,
-    write('  move(Room).              % move to connected room'),nl,
+    write('  move(Direction).         % move up/down/left/right on the map'),nl,
     write('  look.                    % describe current room'),nl,
     write('  status.                  % show game status'),nl,
-    write('  perform(Task).           % work on a task in this room'),nl,
     write('  kill(Target).            % eliminate a rabbit in this room (cooldown 3)'),nl,
-    write('  inspect(Target).         % if detective is AI, player cannot inspect'),nl,
-    write('  call_meeting.            % call emergency meeting'),nl,
-    write('  vote(Target).            % vote during meetings'),nl,
     write('  wait.                    % end your action'),nl,
     nl.
 
@@ -83,8 +99,7 @@ reset_world :-
     retractall(revealed_fox(_)),
     retractall(vote(_,_)),
     retractall(alias(_,_)),
-    initial_tasks(Tasks),
-    forall(member(T, Tasks), assertz(T)),
+    assign_tasks_to_rooms,
     forall(characters(Cs), (forall(member(C,Cs), assertz(alive(C))))),
     assign_aliases,
     assign_initial_locations,
@@ -132,7 +147,8 @@ look :-
     location(player,Room),
     format('You are in the ~w.~n', [Room]),
     print_connected(Room),
-    print_room_state(Room).
+    print_room_state(Room),
+    display_map.
 
 print_connected(Room) :-
     findall(Dest, path(Room, Dest), Ds),
@@ -156,6 +172,7 @@ status :-
     format('Alive rabbits: ~w~n', [VisibleRabbits]),
     (alive(player) -> write('You are alive.\n'); write('You are dead.\n')),
     list_tasks_status,
+    display_map,
     show_cooldowns.
 
 list_tasks_status :-
@@ -170,40 +187,61 @@ show_cooldowns :-
         cooldown(player, Skill, V), format('Cooldown ~w: ~w~n',[Skill,V])
     )).
 
-move(To) :-
+move(Direction) :-
     alive(player),
     location(player,From),
-    (path(From,To) -> (
-        retract(location(player,From)),
+    (   adjacent_room(From, Direction, To)
+    ->  retract(location(player,From)),
         assertz(location(player,To)),
         format('You moved to ~w.~n',[To]),
         check_bodies(To),
         player_done
-    ) ; (write('Cannot move there from here.'),nl, player_turn)).
+    ;   valid_direction(Direction)
+    ->  write('Cannot move in that direction from here.'),nl, player_turn
+    ;   write('Unknown direction. Use up/down/left/right.'),nl, player_turn
+    ).
+
+valid_direction(up).
+valid_direction(down).
+valid_direction(left).
+valid_direction(right).
+
+adjacent_room(Room, Direction, Adjacent) :-
+    rooms_grid(Grid),
+    locate_room(Grid, Room, Row, Col),
+    direction_delta(Direction, DRow, DCol),
+    Row1 is Row + DRow,
+    Col1 is Col + DCol,
+    within_grid(Grid, Row1, Col1),
+    nth1(Row1, Grid, RowList),
+    nth1(Col1, RowList, Adjacent).
+
+direction_delta(up, -1, 0).
+direction_delta(down, 1, 0).
+direction_delta(left, 0, -1).
+direction_delta(right, 0, 1).
+
+% adjacency derived from the grid layout
+path(Room, Adjacent) :-
+    adjacent_room(Room, _, Adjacent).
+
+within_grid(Grid, Row, Col) :-
+    Row > 0,
+    Col > 0,
+    length(Grid, RowCount),
+    Row =< RowCount,
+    nth1(1, Grid, FirstRow),
+    length(FirstRow, ColCount),
+    Col =< ColCount.
+
+locate_room(Grid, Room, Row, Col) :-
+    nth1(Row, Grid, RowList),
+    nth1(Col, RowList, Room), !.
 
 wait :-
     alive(player),
     write('You wait.'),nl,
     player_done.
-
-perform(Task) :-
-    alive(player),
-    location(player,Room),
-    (task(Task,Room,Need,Remaining,Status,Occupant) -> (
-        (Status == available ->
-            retract(task(Task,Room,Need,Remaining,Status,Occupant)),
-            NewR is Need - 1,
-            assertz(task(Task,Room,Need,NewR,in_progress,player)),
-            write('You start the task.'),nl,
-            player_done
-        ; Status == in_progress, Occupant == player ->
-            progress_task(Task,Room,player),
-            player_done
-        ; Status == in_progress ->
-            write('Someone else is on that task.'),nl, player_turn
-        ; Status == complete ->
-            write('Task already complete.'),nl, player_turn)
-    ) ; (write('No such task here.'),nl, player_turn)).
 
 kill(Target) :-
     alive(player),
@@ -221,19 +259,6 @@ kill(Target) :-
         player_done
     ; write('No valid target here.'),nl, player_turn).
 
-inspect(_) :-
-    write('Only the AI detective inspects identities.'),nl,
-    player_turn.
-
-call_meeting :-
-    write('You report a body and call a meeting.'),nl,
-    resolve_meeting,
-    player_done.
-
-vote(_) :-
-    write('Voting only happens during meetings.'),nl,
-    player_turn.
-
 player_done :-
     ai_turns,
     game_loop.
@@ -249,12 +274,18 @@ read_command(Command) :-
     normalize_space(string(Trimmed), Raw),
     (Trimmed == "" -> read_command(Command)
     ; ensure_period(Trimmed, WithPeriod),
-      (   catch(read_term_from_atom(WithPeriod, Command, []), error(syntax_error(_),_), fail)
-      ->  true
+      (   catch(read_term_from_atom(WithPeriod, Command0, [variable_names(Vars)]), error(syntax_error(_),_), fail)
+      ->  bind_variable_names(Vars),
+          Command = Command0
       ;   write('Could not parse that command. Try syntax like look. or kill(bunny1).'),nl,
           read_command(Command)
       )
     ).
+
+bind_variable_names([]).
+bind_variable_names([Name=Var|Rest]) :-
+    ( var(Var) -> Var = Name ; true ),
+    bind_variable_names(Rest).
 
 ensure_period(Str, Str) :-
     sub_string(Str, _, 1, 0, '.'), !.
@@ -281,7 +312,11 @@ progress_task(Task,Room,Actor) :-
     ) ; assertz(task(Task,Room,Need,NewR,in_progress,Actor))).
 
 check_bodies(Room) :-
-    (body(Room,_) -> write('You spot a body here! You may call a meeting.'),nl ; true).
+    (   body(Room,_)
+    ->  write('You spot a body here! A meeting will be triggered.'),nl,
+        resolve_meeting
+    ;   true
+    ).
 
 game_loop :-
     (check_victory -> true ;
@@ -356,9 +391,7 @@ attempt_task(AI) :-
         (Room == TargetRoom ->
             (task(TargetTask,Room,_,_,available,none) ->
                 retract(task(TargetTask,Room,N,R,available,none)),
-                assertz(task(TargetTask,Room,N,R,in_progress,AI)),
-                visible_name(AI, VisibleAI),
-                format('~w starts task ~w.~n',[VisibleAI,TargetTask])
+                assertz(task(TargetTask,Room,N,R,in_progress,AI))
             ; progress_task_if_owner(AI,TargetTask,Room)
             )
         ; move_ai_toward(AI,TargetRoom)
@@ -405,17 +438,32 @@ bfs_queue([(Node,D)|Rest], Visited, Goal, Dist) :-
 
 move_ai_toward(AI,TargetRoom) :-
     location(AI,Room),
-    (path(Room,TargetRoom) -> Next = TargetRoom ; find_path(Room,TargetRoom,[Room],Next)),
-    (nonvar(Next) -> (
+    (   Room == TargetRoom
+    ->  true
+    ;   next_step(Room,TargetRoom,Next),
         retract(location(AI,Room)),
         assertz(location(AI,Next)),
         visible_name(AI, VisibleAI),
         format('~w moves to ~w.~n',[VisibleAI,Next])
-    ) ; true).
+    ;   true
+    ).
 
-find_path(Start,Goal,Visited,Next) :-
-    path(Start,Mid), \+ member(Mid,Visited),
-    (Mid == Goal -> Next = Mid ; find_path(Mid,Goal,[Mid|Visited],Next)).
+next_step(Start,Goal,Next) :-
+    shortest_path_nodes(Start, Goal, Path),
+    Path = [Start,Next|_].
+
+shortest_path_nodes(Start, Goal, Path) :-
+    bfs_path([(Start,[Start])], [], Goal, RevPath),
+    reverse(RevPath, Path).
+
+bfs_path([(Node,Path)|_], _, Goal, Path) :- Node == Goal, !.
+bfs_path([(Node,Path)|Rest], Visited, Goal, ResultPath) :-
+    findall((Next,[Next|Path]),
+        ( path(Node,Next), \+ member(Next,Visited), \+ member(Next,Path)),
+        Nexts),
+    append(Rest, Nexts, Queue),
+    append(Visited, [Node], NewVisited),
+    bfs_path(Queue, NewVisited, Goal, ResultPath).
 
 resolve_meeting :-
     write('--- Meeting called ---'),nl,
@@ -510,6 +558,100 @@ tick_world :-
 print_round(R) :-
     format('--- Round ~w ---~n', [R]).
 
+% Map rendering helpers
+display_map :-
+    nl,
+    write('Map:'),nl,
+    rooms_grid(Rows),
+    maplist(maplist(cell_display), Rows, CellRows),
+    findall(Len, (
+        member(Row, CellRows),
+        member(Cell, Row),
+        member(Line, Cell),
+        string_length(Line, Len)
+    ), Lengths),
+    max_list(Lengths, MaxCellLen0),
+    MaxCellLen is max(12, MaxCellLen0),
+    % render each row with separators for consistent alignment
+    forall(member(RowCells, CellRows), (
+        length(RowCells, Count),
+        row_separator(Count, MaxCellLen, Sep),
+        write(Sep), nl,
+        render_row(RowCells, MaxCellLen, Lines),
+        forall(member(Line, Lines), (write(Line), nl))
+    )),
+    CellRows = [FirstRow|_],
+    length(FirstRow, FirstCount),
+    row_separator(FirstCount, MaxCellLen, FinalSep),
+    write(FinalSep), nl,
+    nl.
+
+row_separator(CellCount, CellWidth, Separator) :-
+    ChunkWidth is CellWidth + 2,
+    repeat_char(ChunkWidth, '-', Chunk),
+    length(Chunks, CellCount),
+    maplist(=(Chunk), Chunks),
+    atomic_list_concat(Chunks, '+', Body),
+    atomic_list_concat(['+', Body, '+'], Separator).
+
+render_row(Cells, Width, Lines) :-
+    Cells = [FirstCell|_],
+    length(FirstCell, CellHeight),
+    numlist(1, CellHeight, Indexes),
+    maplist(row_line(Cells, Width), Indexes, Lines).
+
+row_line(Cells, Width, Index, Line) :-
+    maplist(nth1(Index), Cells, Texts),
+    maplist(pad_cell(Width), Texts, Padded),
+    atomic_list_concat(Padded, '|', Body),
+    atomic_list_concat(['|', Body, '|'], Line).
+
+pad_cell(Width, Text, Padded) :-
+    string_length(Text, Len),
+    Pad is Width - Len,
+    repeat_char(Pad, ' ', Spaces),
+    atomic_list_concat([' ', Text, Spaces, ' '], Padded).
+
+repeat_char(N, Char, String) :-
+    length(Chars, N),
+    maplist(=(Char), Chars),
+    atomics_to_string(Chars, '', String).
+
+cell_display(Room, [RoomLine, TaskLine]) :-
+    room_label(Room, Label),
+    player_hint(Room, PH),
+    task_hint(Room, TH),
+    include(\=(""), [PH, TH], Hints),
+    (   Hints = []
+    ->  RoomLine = Label
+    ;   atomics_to_string([Label|Hints], ' ', RoomLine)
+    ),
+    room_tasks_line(Room, TaskLine).
+
+room_label(Room, Label) :- atom_string(Room, Label).
+
+player_hint(Room, "(You are here)") :- location(player, Room), !.
+player_hint(_, "").
+
+task_hint(Room, "(Finished)") :- task(_,Room,_,_,complete,_), !.
+task_hint(_, "").
+
+room_tasks_line(Room, Line) :-
+    findall(Display,
+        ( task(TaskName,Room,_,_,Status,_),
+          task_status_label(Status, StatusLabel),
+          format(string(Display), "~w~w", [TaskName, StatusLabel])
+        ),
+        Tasks),
+    (   Tasks = []
+    ->  Line = ""
+    ;   atomics_to_string(Tasks, ', ', TaskText),
+        atomic_list_concat(['Task:', TaskText], ' ', Line)
+    ).
+
+task_status_label(complete, " (done)") :- !.
+task_status_label(_, "").
+
 decrement_cooldowns :-
     forall(cooldown(Char,Skill,CD), (
         New is max(0, CD-1),
@@ -540,8 +682,8 @@ plan_for_detective(Plan) :-
     (run_pyperplan(Plan) -> true ; default_plan(Plan)).
 
 default_plan([
-    move(detective,living_room),
-    move(detective,kitchen),
+    move(detective,'Hall'),
+    move(detective,'Kitchen'),
     inspect(player)
 ]).
 
@@ -568,5 +710,18 @@ read_lines(Stream, [L|Ls]) :-
 parse_action(Line, move(detective,Room)) :-
     sub_atom(Line,_,_,_, 'move'),
     atomic_list_concat(['(', 'move', detective, RoomAtom, ')' ], ' ', Line),
-    atom_string(Room, RoomAtom).
+    room_from_plan_atom(RoomAtom, Room).
 parse_action(_, inspect(player)).
+
+room_from_plan_atom(RoomAtom, Room) :-
+    atom_string(RoomAtom, PlanString),
+    normalize_token(PlanString, NormalizedPlan),
+    rooms(Rooms),
+    member(Room, Rooms),
+    atom_string(Room, RoomString),
+    normalize_token(RoomString, NormalizedPlan), !.
+
+normalize_token(Str, Normalized) :-
+    string_lower(Str, Lower),
+    split_string(Lower, " _", " _", Parts),
+    atomic_list_concat(Parts, '', Normalized).
