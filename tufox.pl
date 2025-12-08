@@ -813,7 +813,7 @@ cell_display(Room, [RoomLine, TaskLine]) :-
 
 room_label(Room, Label) :- atom_string(Room, Label).
 
-player_hint(Room, "(You are here)") :- location(player, Room), !.
+player_hint(Room, "(You)") :- location(player, Room), !.
 player_hint(_, "").
 
 task_hint(Room, "(Finished)") :- task(_,Room,_,_,complete,_), !.
