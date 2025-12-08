@@ -496,8 +496,15 @@ find_lowest_trust_target(Detective, Target) :-
         ; random_member(Target, [player,bunny1,bunny2,bunny3,bunny4]), alive(Target))
     ;   min_member(score(_,MinS), Scores),
         include(matches_score(MinS), Scores, Lowest),
-        random_member(score(Target,_), Lowest)
+        % If multiple targets have same lowest trust, pick the closest one
+        maplist(add_distance_to_score(Detective), Lowest, WithDist),
+        keysort(WithDist, [_-score(Target,_)|_])
     ).
+
+add_distance_to_score(Detective, score(T,S), Dist-score(T,S)) :-
+    location(Detective, DetRoom),
+    location(T, TargetRoom),
+    shortest_distance(DetRoom, TargetRoom, Dist).
 
 inspect_identity(Target) :-
     role(Target, Role),
