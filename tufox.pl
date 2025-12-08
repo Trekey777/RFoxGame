@@ -22,6 +22,8 @@
 :- dynamic log_entry/4.
 :- dynamic spoken_log/3.
 :- dynamic history_statement/4.
+:- dynamic show_rabbits_on_map/1.
+:- dynamic show_tasks_on_map/1.
 
 rooms([
     'Tower','Library','Armory','Observatory',
@@ -90,6 +92,8 @@ print_help :-
     write('  status.                  % show game status'),nl,
     write('  kill(Target).            % eliminate a rabbit in this room (cooldown 3)'),nl,
     write('  wait.                    % end your action'),nl,
+    write('  show_rabbits.            % toggle rabbit visibility on map'),nl,
+    write('  show_tasks.              % toggle task visibility on map'),nl,
     nl.
 
 reset_world :-
@@ -108,6 +112,10 @@ reset_world :-
     retractall(log_entry(_,_,_,_)),
     retractall(spoken_log(_,_,_)),
     retractall(history_statement(_,_,_,_)),
+    retractall(show_rabbits_on_map(_)),
+    assertz(show_rabbits_on_map(false)),
+    retractall(show_tasks_on_map(_)),
+    assertz(show_tasks_on_map(true)),
     assign_tasks_to_rooms,
     forall(characters(Cs), (forall(member(C,Cs), assertz(alive(C))))),
     assign_aliases,
@@ -256,6 +264,22 @@ wait :-
     alive(player),
     write('You wait.'),nl,
     player_done.
+
+show_rabbits :-
+    show_rabbits_on_map(Current),
+    (Current == true -> New = false ; New = true),
+    retract(show_rabbits_on_map(Current)),
+    assertz(show_rabbits_on_map(New)),
+    format('Show rabbits on map: ~w~n', [New]),
+    player_turn.
+
+show_tasks :-
+    show_tasks_on_map(Current),
+    (Current == true -> New = false ; New = true),
+    retract(show_tasks_on_map(Current)),
+    assertz(show_tasks_on_map(New)),
+    format('Show tasks on map: ~w~n', [New]),
+    player_turn.
 
 kill(Target) :-
     alive(player),
@@ -800,7 +824,7 @@ repeat_char(N, Char, String) :-
     maplist(=(Char), Chars),
     atomics_to_string(Chars, '', String).
 
-cell_display(Room, [RoomLine, TaskLine]) :-
+cell_display(Room, Lines) :-
     room_label(Room, Label),
     player_hint(Room, PH),
     task_hint(Room, TH),
@@ -809,7 +833,22 @@ cell_display(Room, [RoomLine, TaskLine]) :-
     ->  RoomLine = Label
     ;   atomics_to_string([Label|Hints], ' ', RoomLine)
     ),
-    room_tasks_line(Room, TaskLine).
+    
+    (   show_tasks_on_map(true)
+    ->  room_tasks_line(Room, TaskLine), Tasks = [TaskLine]
+    ;   Tasks = []
+    ),
+
+    (   show_rabbits_on_map(true)
+    ->  room_rabbits_line(Room, RabbitLine), Rabbits = [RabbitLine]
+    ;   Rabbits = []
+    ),
+    
+    append([ [RoomLine], Tasks, Rabbits ], Lines).
+
+room_rabbits_line(Room, Line) :-
+    findall(S, (location(B,Room), role(B,rabbit), alive(B), visible_name(B,N), (atom_concat(rabbit,R,N)->atom_concat('R',R,S);S=N)), L),
+    (L=[] -> Line="" ; atomics_to_string(L,',',S), format(string(Line),"Rabbits: ~w",[S])).
 
 room_label(Room, Label) :- atom_string(Room, Label).
 
@@ -862,7 +901,7 @@ execute_plan_step(detective) :-
     (Plan = [Action|_] -> apply_action(detective, Action) ; true).
 
 plan_for_detective(Plan) :-
-    (run_pyperplan(Plan) -> true ; default_plan(Plan)).
+    default_plan(Plan).
 
 default_plan([
     move(detective,'Hall'),
