@@ -1,0 +1,3 @@
+(move detective dungeon wine_cellar)
+(move detective wine_cellar balcony)
+(inspect detective bunny1 balcony)

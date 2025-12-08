@@ -1,3 +1,21 @@
-2025-12-08 18:22:34,109 INFO     using search: breadth_first_search
-2025-12-08 18:22:34,110 INFO     using heuristic: None
-2025-12-08 18:22:34,110 INFO     Parsing Domain /home/zhongrx01/workspace/assignment/RFoxGame/adversary_domain.pddl
+2025-12-08 22:37:41,748 INFO     using search: greedy_best_first_search
+2025-12-08 22:37:41,748 INFO     using heuristic: hFFHeuristic
+2025-12-08 22:37:41,748 INFO     Parsing Domain /home/zhongrx01/workspace/assignment/RFoxGame/adversary_domain.pddl
+2025-12-08 22:37:41,749 INFO     Parsing Problem /home/zhongrx01/workspace/assignment/RFoxGame/adversary_problem.pddl
+2025-12-08 22:37:41,749 INFO     6 Predicates parsed
+2025-12-08 22:37:41,749 INFO     2 Actions parsed
+2025-12-08 22:37:41,749 INFO     22 Objects parsed
+2025-12-08 22:37:41,749 INFO     0 Constants parsed
+2025-12-08 22:37:41,749 INFO     Grounding start: tufox-instance
+2025-12-08 22:37:41,759 INFO     Relevance analysis removed 56 facts
+2025-12-08 22:37:41,759 INFO     Grounding end: tufox-instance
+2025-12-08 22:37:41,760 INFO     90 Variables created
+2025-12-08 22:37:41,760 INFO     112 Operators created
+2025-12-08 22:37:41,760 INFO     Search start: tufox-instance
+2025-12-08 22:37:41,760 INFO     Initial h value: 3.000000
+2025-12-08 22:37:41,761 INFO     Goal reached. Start extraction of solution.
+2025-12-08 22:37:41,761 INFO     4 Nodes expanded
+2025-12-08 22:37:41,761 INFO     Search end: tufox-instance
+2025-12-08 22:37:41,761 INFO     Search time: 0.0017
+2025-12-08 22:37:41,761 INFO     Plan length: 3
+2025-12-08 22:37:41,801 INFO     validate could not be found on the PATH so the plan can not be validated.
