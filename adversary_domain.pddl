@@ -12,7 +12,7 @@
 
   (:action move
     :parameters (?agent - agent ?from - room ?to - room)
-    :precondition (and (alive ?agent) (at ?agent ?from) (connected ?from ?to))
+    :precondition (and (is-detective ?agent) (alive ?agent) (at ?agent ?from) (connected ?from ?to))
     :effect (and (not (at ?agent ?from)) (at ?agent ?to))
   )
 

@@ -45,14 +45,14 @@ rooms_grid([
 
 % task(TaskId, Room, NeededRounds, RemainingRounds, Status, Occupant)
 task_specs([
-    spec(collect_food,3),
-    spec(fix_wiring,4),
-    spec(clean_vent,3),
-    spec(fix_chandelier,3),
-    spec('organize scrolls',2),
-    spec('polish armor',3),
-    spec('sweep hall',2),
-    spec('check telescope',3)
+    spec(collect_food,4),
+    spec(fix_wiring,5),
+    spec(clean_vent,4),
+    spec(fix_chandelier,4),
+    spec('organize scrolls',3),
+    spec('polish armor',4),
+    spec('sweep hall',3),
+    spec('check telescope',4)
 ]).
 
 assign_tasks_to_rooms :-
@@ -101,7 +101,8 @@ print_help :-
     write('  wait.                    % end your action'),nl,
     write('  show_rabbits.            % toggle rabbit visibility on map'),nl,
     write('  show_tasks.              % toggle task visibility on map'),nl,
-    write('  toggle_planner.          % toggle external PDDL planner for detective'),nl,
+    write('  use_planner.             % toggle external PDDL planner for detective'),nl,
+    write('  show_pddl.               % toggle visibility of PDDL planned actions'),nl,
     nl.
 
 reset_world :-
@@ -145,16 +146,30 @@ initialize_trust :-
 
 assign_initial_locations :-
     rooms(Rooms),
+    % 1. Assign Player
     random_member(PlayerRoom, Rooms),
     assertz(location(player, PlayerRoom)),
-    repeat,
-        random_member(DetectiveRoom, Rooms),
-        DetectiveRoom \= PlayerRoom,
-    !,
-    assertz(location(detective, DetectiveRoom)),
+    
+    % 2. Assign Rabbits (avoid Player)
     findall(Bunny, role(Bunny, rabbit), Bunnies),
-    subtract(Rooms, [PlayerRoom, DetectiveRoom], AvailableRooms),
-    assign_bunny_locations(AvailableRooms, Bunnies).
+    subtract(Rooms, [PlayerRoom], RoomsForBunnies),
+    random_permutation(RoomsForBunnies, ShuffledForBunnies),
+    length(Bunnies, NumBunnies),
+    take(NumBunnies, ShuffledForBunnies, BunnyRooms),
+    maplist(assert_location, Bunnies, BunnyRooms),
+    
+    % 3. Assign Detective (avoid Player and Rabbits)
+    append([PlayerRoom], BunnyRooms, OccupiedRooms),
+    subtract(Rooms, OccupiedRooms, FreeRooms),
+    (FreeRooms \= [] ->
+        random_member(DetectiveRoom, FreeRooms),
+        assertz(location(detective, DetectiveRoom))
+    ;   % Fallback if no free rooms (unlikely with 16 rooms)
+        random_member(DetectiveRoom, Rooms),
+        assertz(location(detective, DetectiveRoom))
+    ).
+
+assert_location(Char, Room) :- assertz(location(Char, Room)).
 
 assign_bunny_locations(Rooms, Bunnies) :-
     random_permutation(Rooms, Shuffled),
@@ -221,7 +236,7 @@ move(Direction) :-
     alive(player),
     location(player,From),
     (   adjacent_room(From, Direction, To)
-    ->  retract(location(player,From)),
+    ->  retractall(location(player,_)), % Ensure only one location
         assertz(location(player,To)),
         format('You moved to ~w.~n',[To]),
         check_bodies(To),
@@ -289,20 +304,48 @@ show_tasks :-
     format('Show tasks on map: ~w~n', [New]),
     player_turn.
 
+use_planner :-
+    use_external_planner(Current),
+    (Current == true -> New = false ; New = true),
+    retract(use_external_planner(Current)),
+    assertz(use_external_planner(New)),
+    format('External planner enabled: ~w~n', [New]),
+    player_turn.
+
+show_pddl :-
+    show_planned_actions(Current),
+    (Current == true -> New = false ; New = true),
+    retract(show_planned_actions(Current)),
+    assertz(show_planned_actions(New)),
+    format('Show PDDL actions: ~w~n', [New]),
+    player_turn.
+
 kill(Target) :-
     alive(player),
     cooldown(player,kill,CD),
     (CD > 0 -> format('Kill skill cooling down (~w).~n',[CD]), player_turn
     ; resolve_target(Target, Resolved),
-      location(player,Room), location(Resolved,Room), alive(Resolved), Resolved \= player ->
-        retract(alive(Resolved)),
-        release_tasks_for(Resolved),
-        assertz(body(Room,Resolved)),
-        retract(cooldown(player,kill,_)),
-        assertz(cooldown(player,kill,3)),
-        visible_name(Resolved, Visible),
-        format('You eliminated ~w!~n',[Visible]),
-        player_done
+      location(player,Room), location(Resolved,Room), alive(Resolved), Resolved \= player 
+    ->  (Resolved == detective 
+        ->  write('You cannot kill the detective!'), nl, player_turn
+        ;   findall(C, (location(C,Room), alive(C)), Present),
+            length(Present, RoomCount),
+            findall(A, alive(A), AllAlive),
+            length(AllAlive, TotalAlive),
+            % If total alive > 3 (Player + >2 others), witnesses prevent killing.
+            % If total alive <= 3 (e.g. Player + Detective + 1 Rabbit), killing is allowed even with witnesses.
+            (TotalAlive > 3, RoomCount > 2
+            ->  write('Too many witnesses! You cannot kill when others are watching.'), nl, player_turn
+            ;   retract(alive(Resolved)),
+                release_tasks_for(Resolved),
+                assertz(body(Room,Resolved)),
+                retract(cooldown(player,kill,_)),
+                assertz(cooldown(player,kill,3)),
+                visible_name(Resolved, Visible),
+                format('You eliminated ~w!~n',[Visible]),
+                player_done
+            )
+        )
     ; write('No valid target here.'),nl, player_turn).
 
 player_done :-
@@ -396,9 +439,9 @@ tasks_remaining(Rem) :-
 ai_turns :-
     alive_rabbits(Rs),
     forall(member(AI, Rs), ai_act(AI)),
-    record_round_logs,
-    tick_world,
-    check_meeting_trigger.
+    (record_round_logs -> true ; write('DEBUG: record_round_logs failed'), nl, fail),
+    (tick_world -> true ; write('DEBUG: tick_world failed'), nl, fail),
+    (check_meeting_trigger -> true ; write('DEBUG: check_meeting_trigger failed'), nl, fail).
 
 check_meeting_trigger :-
     (   meeting_pending
@@ -489,6 +532,7 @@ find_lowest_trust_target(Detective, Target) :-
         \+ inspected(T),  % Only consider uninspected targets
         trust(Detective, T, S)
     ), Scores),
+    format('DEBUG: Trust Scores for Detective: ~w~n', [Scores]), % DEBUG
     (   Scores = []
     ->  % If everyone is inspected or no trust scores, fallback to random uninspected or just random
         findall(T, (alive(T), T \= Detective, \+ inspected(T)), Uninspected),
@@ -509,6 +553,12 @@ add_distance_to_score(Detective, score(T,S), Dist-score(T,S)) :-
 inspect_identity(Target) :-
     role(Target, Role),
     assertz(inspected(Target)),
+    % Increase trust significantly after inspection so detective ignores them later
+    trust(detective, Target, OldTrust),
+    NewTrust is OldTrust + 100,
+    retract(trust(detective, Target, OldTrust)),
+    assertz(trust(detective, Target, NewTrust)),
+    
     retract(cooldown(detective,inspect,_)),
     assertz(cooldown(detective,inspect,2)),
     (Role == fox -> 
@@ -620,8 +670,9 @@ resolve_meeting(Reason) :-
     apply_advanced_trust_rules(Victims),
     run_votes,
     update_meeting_timer,
-    scramble_rabbit_locations,
+    scramble_locations,
     print_trust_scores,
+    display_map, % Show map after scramble
     clear_bodies,
     !.
 
@@ -679,29 +730,46 @@ decrease_player_trust :-
     )).
 
 print_trust_scores :-
-    write('--- Trust Scores (Lowest to Highest) ---'), nl,
-    forall(alive(AI), (
-        visible_name(AI, VName),
-        format('~w trusts:~n', [VName]),
-        findall(val(Score, Target), (trust(AI, Target, Score), Target \= AI), Scores),
-        sort(Scores, Sorted),
-        forall(member(val(S, T), Sorted), (
-            visible_name(T, VT),
-            format('  ~w: ~w~n', [VT, S])
-        ))
+    write('--- Trust Matrix (Row trusts Column) ---'), nl,
+    findall(C, alive(C), Chars),
+    % Header row
+    write('           '), % Padding for row labels
+    forall(member(C, Chars), (
+        visible_name(C, Name),
+        format('~|~w~t~10+', [Name])
+    )),
+    nl,
+    % Data rows
+    forall(member(Observer, Chars), (
+        visible_name(Observer, ObsName),
+        format('~|~w~t~10+|', [ObsName]),
+        forall(member(Target, Chars), (
+            (Observer == Target -> write('   -      ')
+            ; trust(Observer, Target, Score) -> format('~|~w~t~10+', [Score])
+            ; write('   ?      ')
+            )
+        )),
+        nl
     )),
     nl.
 
 resolve_meeting :- resolve_meeting('Unknown').
 
-scramble_rabbit_locations :-
-    write('Rabbits scatter to new locations...'), nl,
+scramble_locations :-
+    write('Characters scatter to new locations...'), nl,
     rooms(Rooms),
+    location(player, PlayerRoom),
+    
+    % 1. Scramble Rabbits
     findall(R, (role(R, rabbit), alive(R)), Rabbits),
-    % Remove old locations for these rabbits
     forall(member(R, Rabbits), retractall(location(R, _))),
-    % Rabbits can go anywhere, no need to avoid player/detective
-    assign_bunny_locations(Rooms, Rabbits).
+    assign_bunny_locations(Rooms, Rabbits),
+    
+    % 2. Scramble Detective (avoid Player)
+    retractall(location(detective, _)),
+    subtract(Rooms, [PlayerRoom], AvailableForDet),
+    random_member(DetRoom, AvailableForDet),
+    assertz(location(detective, DetRoom)).
 
 discussion_phase :-
     write('--- Discussion phase ---'),nl,
@@ -791,14 +859,16 @@ apply_trust_delta(AI, Target, _, Old, New) :-
     assertz(trust(AI, Target, New)).
 
 report_trust_evaluation(AI, Speaker, Round, Room, StatedOthers, Logged, Outcome, Current, New) :-
-    format_statement(Speaker, Round, Room, StatedOthers, StatementText),
-    visible_name(AI, VisibleAI),
-    visible_name(Speaker, VisibleSpeaker),
-    format_log_snapshot(Round, Room, Logged, LoggedText),
-    trust_outcome_text(Outcome, DeltaText),
-    format('  Statement by ~w: ~w~n', [VisibleSpeaker, StatementText]),
-    format('  Log of ~w: ~w~n', [VisibleAI, LoggedText]),
-    format('  Evaluation: ~w (Trust ~w -> ~w)~n', [DeltaText, Current, New]).
+    (Outcome \= missing ->
+        format_statement(Speaker, Round, Room, StatedOthers, StatementText),
+        visible_name(AI, VisibleAI),
+        visible_name(Speaker, VisibleSpeaker),
+        format_log_snapshot(Round, Room, Logged, LoggedText),
+        trust_outcome_text(Outcome, DeltaText),
+        format('  Statement by ~w: ~w~n', [VisibleSpeaker, StatementText]),
+        format('  Log of ~w: ~w~n', [VisibleAI, LoggedText]),
+        format('  Evaluation: ~w (Trust ~w -> ~w)~n', [DeltaText, Current, New])
+    ; true).
 
 format_log_snapshot(_, _, none, 'No corresponding log').
 format_log_snapshot(Round, Room, Others, Text) :-
@@ -814,13 +884,44 @@ run_votes :-
     retractall(vote(_,_)),
     (alive(player) -> player_vote ; true),
     ai_votes,
+    print_vote_matrix,
     tally_votes.
+
+print_vote_matrix :-
+    write('--- Vote Matrix (Row votes for Column) ---'), nl,
+    findall(C, alive(C), Chars),
+    % Header row
+    write('           '),
+    forall(member(C, Chars), (
+        visible_name(C, Name),
+        format('~|~w~t~10+', [Name])
+    )),
+    format('~|~w~t~10+', ['Abstain']),
+    nl,
+    % Data rows
+    forall(member(Voter, Chars), (
+        visible_name(Voter, VName),
+        format('~|~w~t~10+|', [VName]),
+        (vote(Voter, Target) -> true ; Target = unknown),
+        forall(member(Candidate, Chars), (
+            (Target == Candidate -> write('    X     ')
+            ; write('    -     ')
+            )
+        )),
+        (Target == abstain -> write('    X     ') ; write('    -     ')),
+        nl
+    )),
+    nl.
 
 player_vote :-
     write('Cast your vote (atom ending with period). alive characters: '),
     alive_rabbits(Rs), display_names(Rs, Visible), write(Visible),nl,
     read(V),
-    (resolve_target(V, Target), alive(Target), Target \= player -> assertz(vote(player,Target)) ; write('Abstain.'),nl).
+    (   (V = vote(T) -> Target = T ; Target = V), % Support vote(X) or just X
+        alive(Target), Target \= player 
+    ->  assertz(vote(player,Target)) 
+    ;   write('Abstain.'),nl, assertz(vote(player, abstain))
+    ).
 
 ai_votes :-
     forall((alive(AI), AI \= player), ai_single_vote(AI)).
@@ -851,15 +952,11 @@ unique_lowest_trust_target(AI, Candidates, Vote) :-
 matches_score(Min, score(_,Score)) :- Score =:= Min.
 
 record_vote(AI, abstain) :-
-    visible_name(AI, VisibleAI),
-    format('~w abstains.~n', [VisibleAI]).
+    assertz(vote(AI, abstain)).
 
 record_vote(AI, Vote) :-
     Vote \= abstain,
-    assertz(vote(AI, Vote)),
-    visible_name(AI, VisibleAI),
-    visible_name(Vote, VisibleVote),
-    format('~w votes for ~w.~n',[VisibleAI,VisibleVote]).
+    assertz(vote(AI, Vote)).
 
 alive_targets_for_vote(AI, Candidates) :-
     findall(T, (alive(T), T \= AI), Candidates).
@@ -869,9 +966,11 @@ random_vote(Candidates, Vote) :-
     random_member(Vote, Candidates).
 
 select_vote_by_trust(AI, Candidates, Vote) :-
-    findall(score(T,Score), (member(T, Candidates), trust(AI, T, Score)), Scores),
+    findall(score(T,Score), (member(T, Candidates), trust(AI, T, Score)), AllScores),
+    % Filter out highly trusted targets (e.g. > 150)
+    include(low_trust_target, AllScores, Scores),
     (   Scores = []
-    ->  random_vote(Candidates, Vote)
+    ->  Vote = abstain % If everyone is trusted, abstain
     ;   findall(S, member(score(_,S), Scores), Values),
         max_list(Values, Max),
         min_list(Values, Min),
@@ -881,6 +980,8 @@ select_vote_by_trust(AI, Candidates, Vote) :-
         ;   weighted_vote(Scores, Vote)
         )
     ).
+
+low_trust_target(score(_, Score)) :- Score < 150.
 
 weighted_vote(Scores, Vote) :-
     findall(S, member(score(_,S), Scores), Values),
@@ -906,8 +1007,10 @@ tally_votes :-
     (Counts = [] -> write('No votes.'),nl ;
         keysort(Counts,Sorted), reverse(Sorted, [Count-Target|_]),
         vote_threshold(Threshold),
-    (   Count >= Threshold
+    (   Count >= Threshold, Target \= abstain
     ->  eliminate(Target)
+    ;   Target == abstain
+    ->  format('Vote result: Abstain (~w votes). No one ejected.~n', [Count])
     ;   format('Vote failed. Requires at least ~w votes.~n', [Threshold])
     )).
 
@@ -1164,12 +1267,14 @@ generate_pddl_problem(Target) :-
         format(Stream, '    (alive ~w)\n', [A]),
         location(A, Loc),
         normalize_room_name(Loc, LocName),
+        format('DEBUG: PDDL Gen - ~w at ~w (~w)~n', [A, Loc, LocName]), % DEBUG
         format(Stream, '    (at ~w ~w)\n', [A, LocName]),
         (inspected(A) -> true ; format(Stream, '    (not-inspected ~w)\n', [A]))
     )),
     
     location(detective, DetRoom),
     normalize_room_name(DetRoom, DetRoomName),
+    format('DEBUG: PDDL Gen - Detective at ~w (~w)~n', [DetRoom, DetRoomName]), % DEBUG
     format(Stream, '    (at detective ~w)\n', [DetRoomName]),
     
     % Explicitly iterate over all rooms to generate connections
@@ -1209,8 +1314,13 @@ parse_action(Line, Action) :-
     (sub_string(Line, 0, 1, _, "(") -> 
         sub_string(Line, 1, _, 1, Content) 
     ; Content = Line),
-    atomic_list_concat(Tokens, ' ', Content),
-    parse_tokens(Tokens, Action).
+    % Use split_string to handle multiple spaces robustly
+    split_string(Content, " ", " ", StringTokens),
+    maplist(atom_string, Tokens, StringTokens),
+    (   parse_tokens(Tokens, Action)
+    ->  true
+    ;   format('DEBUG: Failed to parse action line: "~w" (Tokens: ~w)~n', [Line, Tokens]), fail
+    ).
 
 parse_tokens(['move', 'detective', _, ToRoomAtom], move(detective, Room)) :-
     room_from_plan_atom(ToRoomAtom, Room).
