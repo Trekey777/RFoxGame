@@ -22,6 +22,12 @@
 :- dynamic log_entry/4.
 :- dynamic spoken_log/3.
 :- dynamic history_statement/4.
+:- dynamic show_rabbits_on_map/1.
+:- dynamic show_tasks_on_map/1.
+:- dynamic meeting_pending/0.
+:- dynamic action_log/1.
+:- dynamic use_external_planner/1.
+:- dynamic show_planned_actions/1.
 
 rooms([
     'Tower','Library','Armory','Observatory',
@@ -39,11 +45,14 @@ rooms_grid([
 
 % task(TaskId, Room, NeededRounds, RemainingRounds, Status, Occupant)
 task_specs([
-    spec(collect_food,6),
-    spec(fix_wiring,7),
-    spec(clean_vent,6),
-    spec(fix_chandelier,5),
-    spec('Organize Ancient Scrolls',4)
+    spec(collect_food,4),
+    spec(fix_wiring,5),
+    spec(clean_vent,4),
+    spec(fix_chandelier,4),
+    spec('organize scrolls',3),
+    spec('polish armor',4),
+    spec('sweep hall',3),
+    spec('check telescope',4)
 ]).
 
 assign_tasks_to_rooms :-
@@ -90,6 +99,10 @@ print_help :-
     write('  status.                  % show game status'),nl,
     write('  kill(Target).            % eliminate a rabbit in this room (cooldown 3)'),nl,
     write('  wait.                    % end your action'),nl,
+    write('  show_rabbits.            % toggle rabbit visibility on map'),nl,
+    write('  show_tasks.              % toggle task visibility on map'),nl,
+    write('  use_planner.             % toggle external PDDL planner for detective'),nl,
+    write('  show_pddl.               % toggle visibility of PDDL planned actions'),nl,
     nl.
 
 reset_world :-
@@ -108,60 +121,73 @@ reset_world :-
     retractall(log_entry(_,_,_,_)),
     retractall(spoken_log(_,_,_)),
     retractall(history_statement(_,_,_,_)),
+    retractall(show_rabbits_on_map(_)),
+    assertz(show_rabbits_on_map(true)),
+    retractall(show_tasks_on_map(_)),
+    assertz(show_tasks_on_map(true)),
+    retractall(meeting_pending),
+    retractall(action_log(_)),
+    retractall(use_external_planner(_)),
+    assertz(use_external_planner(true)), % Default to external planner
+    retractall(show_planned_actions(_)),
+    assertz(show_planned_actions(false)), % Default to hidden
     assign_tasks_to_rooms,
     forall(characters(Cs), (forall(member(C,Cs), assertz(alive(C))))),
-    assign_aliases,
     assign_initial_locations,
     initialize_trust,
     assertz(cooldown(player,kill,0)),
     assertz(cooldown(detective,inspect,2)),
-    assertz(next_meeting(3)),
+    assertz(next_meeting(4)),
     assertz(round_counter(0)).
 
 initialize_trust :-
     characters(Chars),
     forall((member(A, Chars), member(B, Chars), A \= B), assertz(trust(A,B,100))).
 
-assign_aliases :-
-    characters(Chars),
-    exclude(=(player), Chars, NonPlayer),
-    length(NonPlayer, Count),
-    numlist(1, Count, Numbers),
-    maplist(number_alias, Numbers, Aliases),
-    random_permutation(Aliases, Shuffled),
-    pair_aliases(NonPlayer, Shuffled).
-
-number_alias(N, AliasAtom) :-
-    atomic_list_concat([rabbit, N], AliasAtom).
-
-pair_aliases([], []).
-pair_aliases([C|Cs], [A|As]) :-
-    assertz(alias(C,A)),
-    pair_aliases(Cs, As).
-
 assign_initial_locations :-
     rooms(Rooms),
+    % 1. Assign Player
     random_member(PlayerRoom, Rooms),
     assertz(location(player, PlayerRoom)),
-    repeat,
-        random_member(DetectiveRoom, Rooms),
-        DetectiveRoom \= PlayerRoom,
-    !,
-    assertz(location(detective, DetectiveRoom)),
+    
+    % 2. Assign Rabbits (avoid Player)
     findall(Bunny, role(Bunny, rabbit), Bunnies),
-    assign_bunny_locations(Rooms, Bunnies).
+    subtract(Rooms, [PlayerRoom], RoomsForBunnies),
+    random_permutation(RoomsForBunnies, ShuffledForBunnies),
+    length(Bunnies, NumBunnies),
+    take(NumBunnies, ShuffledForBunnies, BunnyRooms),
+    maplist(assert_location, Bunnies, BunnyRooms),
+    
+    % 3. Assign Detective (avoid Player and Rabbits)
+    append([PlayerRoom], BunnyRooms, OccupiedRooms),
+    subtract(Rooms, OccupiedRooms, FreeRooms),
+    (FreeRooms \= [] ->
+        random_member(DetectiveRoom, FreeRooms),
+        assertz(location(detective, DetectiveRoom))
+    ;   % Fallback if no free rooms (unlikely with 16 rooms)
+        random_member(DetectiveRoom, Rooms),
+        assertz(location(detective, DetectiveRoom))
+    ).
 
-assign_bunny_locations(_, []) :- !.
-assign_bunny_locations(Rooms, [Bunny|Rest]) :-
-    random_member(Room, Rooms),
+assert_location(Char, Room) :- assertz(location(Char, Room)).
+
+assign_bunny_locations(Rooms, Bunnies) :-
+    random_permutation(Rooms, Shuffled),
+    assign_unique_rooms(Shuffled, Bunnies).
+
+assign_unique_rooms(_, []).
+assign_unique_rooms([], Bunnies) :- % Fallback if more bunnies than rooms
+    rooms(All),
+    assign_bunny_locations(All, Bunnies).
+assign_unique_rooms([Room|RestRooms], [Bunny|RestBunnies]) :-
     assertz(location(Bunny, Room)),
-    assign_bunny_locations(Rooms, Rest).
+    assign_unique_rooms(RestRooms, RestBunnies).
 
 look :-
-    location(player,Room),
-    format('You are in the ~w.~n', [Room]),
-    print_connected(Room),
-    print_room_state(Room),
+    % location(player,Room),
+    % format('You are in the ~w.~n', [Room]),
+    % print_connected(Room),
+    % print_room_state(Room),
     display_map.
 
 print_connected(Room) :-
@@ -184,16 +210,21 @@ status :-
     alive_rabbits(AliveRabbits),
     display_names(AliveRabbits, VisibleRabbits),
     format('Alive rabbits: ~w~n', [VisibleRabbits]),
+    findall(D, (role(D,rabbit), \+ alive(D)), DeadRabbits),
+    display_names(DeadRabbits, VisibleDead),
+    (VisibleDead \= [] -> format('Dead rabbits: ~w~n', [VisibleDead]) ; true),
     (alive(player) -> write('You are alive.\n'); write('You are dead.\n')),
     list_tasks_status,
     display_map,
     show_cooldowns.
 
 list_tasks_status :-
-    findall(desc(T,Room,Status,Remaining,Occupant), task(T,Room,_,Remaining,Status,Occupant), Descs),
-    forall(member(desc(T,Room,S,R,O), Descs), (
+    findall(desc(T,Room,Status,Total,Remaining,Occupant), task(T,Room,Total,Remaining,Status,Occupant), Descs),
+    forall(member(desc(T,Room,S,Total,R,O), Descs), (
         visible_name(O, VisibleO),
-        format('Task ~w in ~w: ~w (~w rounds left, occupant ~w)~n', [T,Room,S,R,VisibleO])
+        (alive(O) -> OccStr = VisibleO ; format(string(OccStr), "~w (was dead)", [VisibleO])),
+        Done is Total - R,
+        format('Task ~w in ~w: ~w (~w/~w rounds done, occupant ~w)~n', [T,Room,S,Done,Total,OccStr])
     )).
 
 show_cooldowns :-
@@ -205,7 +236,7 @@ move(Direction) :-
     alive(player),
     location(player,From),
     (   adjacent_room(From, Direction, To)
-    ->  retract(location(player,From)),
+    ->  retractall(location(player,_)), % Ensure only one location
         assertz(location(player,To)),
         format('You moved to ~w.~n',[To]),
         check_bodies(To),
@@ -257,20 +288,64 @@ wait :-
     write('You wait.'),nl,
     player_done.
 
+show_rabbits :-
+    show_rabbits_on_map(Current),
+    (Current == true -> New = false ; New = true),
+    retract(show_rabbits_on_map(Current)),
+    assertz(show_rabbits_on_map(New)),
+    format('Show rabbits on map: ~w~n', [New]),
+    player_turn.
+
+show_tasks :-
+    show_tasks_on_map(Current),
+    (Current == true -> New = false ; New = true),
+    retract(show_tasks_on_map(Current)),
+    assertz(show_tasks_on_map(New)),
+    format('Show tasks on map: ~w~n', [New]),
+    player_turn.
+
+use_planner :-
+    use_external_planner(Current),
+    (Current == true -> New = false ; New = true),
+    retract(use_external_planner(Current)),
+    assertz(use_external_planner(New)),
+    format('External planner enabled: ~w~n', [New]),
+    player_turn.
+
+show_pddl :-
+    show_planned_actions(Current),
+    (Current == true -> New = false ; New = true),
+    retract(show_planned_actions(Current)),
+    assertz(show_planned_actions(New)),
+    format('Show PDDL actions: ~w~n', [New]),
+    player_turn.
+
 kill(Target) :-
     alive(player),
     cooldown(player,kill,CD),
     (CD > 0 -> format('Kill skill cooling down (~w).~n',[CD]), player_turn
     ; resolve_target(Target, Resolved),
-      location(player,Room), location(Resolved,Room), alive(Resolved), Resolved \= player ->
-        retract(alive(Resolved)),
-        release_tasks_for(Resolved),
-        assertz(body(Room,Resolved)),
-        retract(cooldown(player,kill,_)),
-        assertz(cooldown(player,kill,3)),
-        visible_name(Resolved, Visible),
-        format('You eliminated ~w!~n',[Visible]),
-        player_done
+      location(player,Room), location(Resolved,Room), alive(Resolved), Resolved \= player 
+    ->  (Resolved == detective 
+        ->  write('You cannot kill the detective!'), nl, player_turn
+        ;   findall(C, (location(C,Room), alive(C)), Present),
+            length(Present, RoomCount),
+            findall(A, alive(A), AllAlive),
+            length(AllAlive, TotalAlive),
+            % If total alive > 3 (Player + >2 others), witnesses prevent killing.
+            % If total alive <= 3 (e.g. Player + Detective + 1 Rabbit), killing is allowed even with witnesses.
+            (TotalAlive > 3, RoomCount > 2
+            ->  write('Too many witnesses! You cannot kill when others are watching.'), nl, player_turn
+            ;   retract(alive(Resolved)),
+                release_tasks_for(Resolved),
+                assertz(body(Room,Resolved)),
+                retract(cooldown(player,kill,_)),
+                assertz(cooldown(player,kill,3)),
+                visible_name(Resolved, Visible),
+                format('You eliminated ~w!~n',[Visible]),
+                player_done
+            )
+        )
     ; write('No valid target here.'),nl, player_turn).
 
 player_done :-
@@ -308,35 +383,37 @@ ensure_period(Str, WithPeriod) :-
 
 visible_name(player, you) :- !.
 visible_name(none, none) :- !.
-visible_name(Char, Name) :-
-    (alias(Char, Alias) -> Name = Alias ; Name = Char).
+visible_name(Char, Char).
 
 display_names(Chars, Names) :-
     maplist(visible_name, Chars, Names).
 
-resolve_target(Input, Target) :-
-    (alias(Target, Input) -> true ; Target = Input).
+resolve_target(Target, Target).
 
 progress_task(Task,Room,Actor) :-
     retract(task(Task,Room,Need,Remaining,in_progress,Actor)),
     NewR is Remaining - 1,
     (NewR =< 0 -> (
         assertz(task(Task,Room,Need,0,complete,none)),
-        format('Task ~w completed!~n',[Task])
-    ) ; assertz(task(Task,Room,Need,NewR,in_progress,Actor))).
+        format(string(Msg), 'Task ~w completed!~n',[Task]),
+        assertz(action_log(Msg))
+    ) ; 
+        assertz(task(Task,Room,Need,NewR,in_progress,Actor)),
+        visible_name(Actor, VName),
+        Done is Need - NewR,
+        format(string(Msg), '~w is busy working on ~w (~w/~w).~n', [VName, Task, Done, Need]),
+        assertz(action_log(Msg))
+    ).
 
 check_bodies(Room) :-
     (   body(Room,_)
-    ->  write('You spot a body here! A meeting will be triggered.'),nl,
-        resolve_meeting
+    ->  write('You spot a body here! Meeting will be called at the end of the round.'),nl,
+        (meeting_pending -> true ; assertz(meeting_pending))
     ;   true
     ).
 
 game_loop :-
     (check_victory -> true ;
-        round_counter(R),
-        next_meeting(NM),
-        (R >= NM -> resolve_meeting ; true),
         (alive(player) -> player_turn ; (ai_turns, game_loop))
     ).
 
@@ -362,8 +439,17 @@ tasks_remaining(Rem) :-
 ai_turns :-
     alive_rabbits(Rs),
     forall(member(AI, Rs), ai_act(AI)),
-    record_round_logs,
-    tick_world.
+    (record_round_logs -> true ; write('DEBUG: record_round_logs failed'), nl, fail),
+    (tick_world -> true ; write('DEBUG: tick_world failed'), nl, fail),
+    (check_meeting_trigger -> true ; write('DEBUG: check_meeting_trigger failed'), nl, fail).
+
+check_meeting_trigger :-
+    (   meeting_pending
+    ->  resolve_meeting('Body found'), retractall(meeting_pending)
+    ;   round_counter(R), next_meeting(NM), R >= NM
+    ->  resolve_meeting('Time up')
+    ;   true
+    ).
 
 record_round_logs :-
     round_counter(R0),
@@ -399,31 +485,92 @@ ai_act_logic(AI) :-
 ai_act_logic(detective) :-
     location(detective,Room),
     ( body(Room,_) ->
-        resolve_meeting
+        (meeting_pending -> true ; assertz(meeting_pending), assertz(action_log('Detective found a body! Meeting pending...\n')))
     ; ( cooldown(detective,inspect,CD),
         CD =:= 0,
         findall(T, (location(T,Room), alive(T), T \= detective, \+ inspected(T)), Targets),
         Targets \= [] ->
             Targets = [Target|_],
             inspect_identity(Target)
-      ; execute_plan_step(detective)
+      ; % Check if external planner is enabled
+        ( use_external_planner(true)
+        ->  find_lowest_trust_target(detective, Target),
+            generate_pddl_problem(Target),
+            ( run_pyperplan(Plan), Plan = [Action|_]
+            ->  write('Detective is using PDDL planner...'), nl,
+                (show_planned_actions(true) -> format('Planned actions: ~w~n', [Plan]) ; true),
+                apply_action(detective, Action)
+            ;   % Fallback if planner fails: DO NOTHING (or log error)
+                write('PDDL planner failed. Detective waits.'), nl,
+                (exists_file('plan.txt') -> 
+                    open('plan.txt', read, S), 
+                    read_string(S, _, Content), 
+                    close(S), 
+                    format('DEBUG: plan.txt content:\n~s\n', [Content])
+                ;   write('DEBUG: plan.txt does not exist.\n')
+                )
+            )
+        ;   % Internal logic: find lowest trust target
+            find_lowest_trust_target(detective, Target),
+            location(Target, TargetRoom),
+            move_ai_toward(detective, TargetRoom)
+        )
       )
     ).
 
 ai_act_logic(AI) :-
     location(AI,Room),
     (body(Room,_) ->
-        resolve_meeting
+        visible_name(AI, VName),
+        (meeting_pending -> true ; assertz(meeting_pending), format(string(Msg), '~w found a body! Meeting pending...~n', [VName]), assertz(action_log(Msg)))
     ; attempt_task(AI)).
+
+find_lowest_trust_target(Detective, Target) :-
+    findall(score(T,S), (
+        alive(T), 
+        T \= Detective, 
+        \+ inspected(T),  % Only consider uninspected targets
+        trust(Detective, T, S)
+    ), Scores),
+    format('DEBUG: Trust Scores for Detective: ~w~n', [Scores]), % DEBUG
+    (   Scores = []
+    ->  % If everyone is inspected or no trust scores, fallback to random uninspected or just random
+        findall(T, (alive(T), T \= Detective, \+ inspected(T)), Uninspected),
+        (Uninspected \= [] -> random_member(Target, Uninspected)
+        ; random_member(Target, [player,bunny1,bunny2,bunny3,bunny4]), alive(Target))
+    ;   min_member(score(_,MinS), Scores),
+        include(matches_score(MinS), Scores, Lowest),
+        % If multiple targets have same lowest trust, pick the closest one
+        maplist(add_distance_to_score(Detective), Lowest, WithDist),
+        keysort(WithDist, [_-score(Target,_)|_])
+    ).
+
+add_distance_to_score(Detective, score(T,S), Dist-score(T,S)) :-
+    location(Detective, DetRoom),
+    location(T, TargetRoom),
+    shortest_distance(DetRoom, TargetRoom, Dist).
 
 inspect_identity(Target) :-
     role(Target, Role),
     assertz(inspected(Target)),
+    % Increase trust significantly after inspection so detective ignores them later
+    trust(detective, Target, OldTrust),
+    NewTrust is OldTrust + 100,
+    retract(trust(detective, Target, OldTrust)),
+    assertz(trust(detective, Target, NewTrust)),
+    
     retract(cooldown(detective,inspect,_)),
     assertz(cooldown(detective,inspect,2)),
-    (Role == fox -> assertz(revealed_fox(Target)), resolve_meeting ; true),
+    (Role == fox -> 
+        assertz(revealed_fox(Target)),
+        visible_name(Target, VisibleTarget),
+        format('Detective inspects ~w and reveals they are the FOX!~n', [VisibleTarget]),
+        rabbits_win,
+        halt
+    ; true),
     visible_name(Target, VisibleTarget),
-    format('An inspection reveals ~w is ~w.~n',[VisibleTarget,Role]).
+    format(string(Msg), 'An inspection reveals ~w is ~w.~n',[VisibleTarget,Role]),
+    assertz(action_log(Msg)).
 
 attempt_task(AI) :-
     (choose_task(AI, TargetTask, TargetRoom) ->
@@ -431,12 +578,20 @@ attempt_task(AI) :-
         (Room == TargetRoom ->
             (task(TargetTask,Room,_,_,available,none) ->
                 retract(task(TargetTask,Room,N,R,available,none)),
-                assertz(task(TargetTask,Room,N,R,in_progress,AI))
+                assertz(task(TargetTask,Room,N,R,in_progress,AI)),
+                % Immediately progress the task in the same turn
+                progress_task(TargetTask,Room,AI)
             ; progress_task_if_owner(AI,TargetTask,Room)
             )
         ; move_ai_toward(AI,TargetRoom)
         )
-    ; true).
+    ; wander_randomly(AI)).
+
+wander_randomly(AI) :-
+    location(AI, CurrentRoom),
+    findall(Adj, adjacent_room(CurrentRoom, _, Adj), Adjs),
+    random_member(NextRoom, Adjs),
+    move_ai_toward(AI, NextRoom).
 
 progress_task_if_owner(AI,Task,Room) :-
     (task(Task,Room,_,_,in_progress,AI) -> progress_task(Task,Room,AI) ; true).
@@ -484,7 +639,8 @@ move_ai_toward(AI,TargetRoom) :-
         retract(location(AI,Room)),
         assertz(location(AI,Next)),
         visible_name(AI, VisibleAI),
-        format('~w moves to ~w.~n',[VisibleAI,Next])
+        format(string(Msg), '~w moves to ~w.~n',[VisibleAI,Next]),
+        assertz(action_log(Msg))
     ;   true
     ).
 
@@ -505,15 +661,115 @@ bfs_path([(Node,Path)|Rest], Visited, Goal, ResultPath) :-
     append(Visited, [Node], NewVisited),
     bfs_path(Queue, NewVisited, Goal, ResultPath).
 
-resolve_meeting :-
-    write('--- Meeting called ---'),nl,
+resolve_meeting(Reason) :-
+    format('--- Meeting called (~w) ---~n', [Reason]),
+    findall(V, body(_,V), Victims),
     clear_bodies,
     discussion_phase,
     validate_statements,
+    apply_advanced_trust_rules(Victims),
     run_votes,
     update_meeting_timer,
+    scramble_locations,
+    print_trust_scores,
+    display_map, % Show map after scramble
     clear_bodies,
     !.
+
+apply_advanced_trust_rules(Victims) :-
+    write('--- Analyzing meeting history ---'), nl,
+    apply_isolation_penalty,
+    apply_victim_witness_bonus(Victims).
+
+apply_isolation_penalty :-
+    findall(AI, (role(AI, rabbit), alive(AI)), AIs),
+    forall(member(AI, AIs), check_isolation(AI)).
+
+check_isolation(AI) :-
+    get_last_two_statements(AI, stmt(_,_,[]), stmt(_,_,[])),
+    !,
+    visible_name(AI, VName),
+    format('~w has been alone for 2 consecutive meetings. Trust decreases by 10.~n', [VName]),
+    adjust_trust_global(AI, -10).
+check_isolation(_).
+
+apply_victim_witness_bonus(Victims) :-
+    forall(member(V, Victims), check_victim_history(V)).
+
+check_victim_history(Victim) :-
+    get_last_two_statements(Victim, stmt(_,_,Others1), stmt(_,_,Others2)),
+    intersection(Others1, Others2, Common),
+    Common \= [],
+    !,
+    visible_name(Victim, VName),
+    display_names(Common, VCommon),
+    format('Victim ~w repeatedly met: ~w. Trust increases by 10.~n', [VName, VCommon]),
+    forall(member(W, Common), adjust_trust_global(W, 10)).
+check_victim_history(_).
+
+get_last_two_statements(AI, S1, S2) :-
+    findall(R-stmt(R,Room,Others), history_statement(AI, R, Room, Others), Pairs),
+    keysort(Pairs, Sorted),
+    reverse(Sorted, [_-S1, _-S2 | _]).
+
+adjust_trust_global(Target, Delta) :-
+    forall((alive(Observer), Observer \= Target, Observer \= player), (
+        trust(Observer, Target, Old),
+        New is max(0, Old + Delta),
+        retract(trust(Observer, Target, Old)),
+        assertz(trust(Observer, Target, New))
+    )).
+
+decrease_player_trust :-
+    write('Suspicion grows... Trust in player decreases by 5.'), nl,
+    forall((alive(AI), AI \= player), (
+        trust(AI, player, Old),
+        New is max(0, Old - 5),
+        retract(trust(AI, player, Old)),
+        assertz(trust(AI, player, New))
+    )).
+
+print_trust_scores :-
+    write('--- Trust Matrix (Row trusts Column) ---'), nl,
+    findall(C, alive(C), Chars),
+    % Header row
+    write('           '), % Padding for row labels
+    forall(member(C, Chars), (
+        visible_name(C, Name),
+        format('~|~w~t~10+', [Name])
+    )),
+    nl,
+    % Data rows
+    forall(member(Observer, Chars), (
+        visible_name(Observer, ObsName),
+        format('~|~w~t~10+|', [ObsName]),
+        forall(member(Target, Chars), (
+            (Observer == Target -> write('   -      ')
+            ; trust(Observer, Target, Score) -> format('~|~w~t~10+', [Score])
+            ; write('   ?      ')
+            )
+        )),
+        nl
+    )),
+    nl.
+
+resolve_meeting :- resolve_meeting('Unknown').
+
+scramble_locations :-
+    write('Characters scatter to new locations...'), nl,
+    rooms(Rooms),
+    location(player, PlayerRoom),
+    
+    % 1. Scramble Rabbits
+    findall(R, (role(R, rabbit), alive(R)), Rabbits),
+    forall(member(R, Rabbits), retractall(location(R, _))),
+    assign_bunny_locations(Rooms, Rabbits),
+    
+    % 2. Scramble Detective (avoid Player)
+    retractall(location(detective, _)),
+    subtract(Rooms, [PlayerRoom], AvailableForDet),
+    random_member(DetRoom, AvailableForDet),
+    assertz(location(detective, DetRoom)).
 
 discussion_phase :-
     write('--- Discussion phase ---'),nl,
@@ -526,21 +782,28 @@ speak_from_log(player) :-
     (SafeEntries = [] -> write('You stay silent to avoid conflicts.'),nl
     ; present_log_choices(SafeEntries, Choice),
       (   Choice == 0
-      ->  write('你选择保持沉默。'), nl
+      ->  write('You chose to remain silent.'), nl
       ;   nth1(Choice, SafeEntries, entry(R,Room,Others))
       ->  register_statement(player, R, Room, Others)
-      ;   write('无效选择，保持沉默。'), nl
+      ;   write('Invalid choice. Remaining silent.'), nl
       )
     ).
 speak_from_log(Char) :-
     findall(entry(R,Room,Others), (log_entry(Char,R,Room,Others), \+ spoken_log(Char,R,Room)), Entries),
     (Entries = [] -> true
-    ; random_member(entry(R,Room,Others), Entries),
+    ; ( include(has_many_witnesses, Entries, ImportantEntries), ImportantEntries \= []
+      -> random_member(entry(R,Room,Others), ImportantEntries)
+      ;  random_member(entry(R,Room,Others), Entries)
+      ),
       register_statement(Char, R, Room, Others)
     ).
 
+has_many_witnesses(entry(_,_,Others)) :-
+    length(Others, L),
+    L >= 2.
+
 present_log_choices(Entries, Choice) :-
-    write('请选择一条日志发言 (输入编号后跟句点，0保持沉默):'), nl,
+    write('Choose a log entry to state (enter number followed by dot, 0 to stay silent):'), nl,
     print_log_options(Entries, 1),
     read(Choice).
 
@@ -565,7 +828,7 @@ format_statement(Char, Round, Room, Others, Text) :-
     visible_name(Char, VisibleChar),
     display_names(Others, VisibleOthers),
     atomic_list_concat(VisibleOthers, ',', OthersText),
-    format(string(Text), '~w在第~w轮在~w，该地方有~w。', [VisibleChar, Round, Room, OthersText]).
+    format(string(Text), '~w was in ~w at round ~w, seeing: ~w.', [VisibleChar, Room, Round, OthersText]).
 
 validate_statements :-
     findall(stmt(Speaker,R,Room,Others), history_statement(Speaker,R,Room,Others), Statements),
@@ -573,7 +836,7 @@ validate_statements :-
 
 validate_against_logs(AI, Statements) :-
     visible_name(AI, VisibleAI),
-    format('~w正在校验发言:~n', [VisibleAI]),
+    format('~w is validating statements:~n', [VisibleAI]),
     forall(member(stmt(Speaker,R,Room,Others), Statements), adjust_trust(AI, Speaker, R, Room, Others)),
     nl.
 
@@ -596,36 +859,69 @@ apply_trust_delta(AI, Target, _, Old, New) :-
     assertz(trust(AI, Target, New)).
 
 report_trust_evaluation(AI, Speaker, Round, Room, StatedOthers, Logged, Outcome, Current, New) :-
-    format_statement(Speaker, Round, Room, StatedOthers, StatementText),
-    visible_name(AI, VisibleAI),
-    visible_name(Speaker, VisibleSpeaker),
-    format_log_snapshot(Round, Room, Logged, LoggedText),
-    trust_outcome_text(Outcome, DeltaText),
-    format('  ~w的发言: ~w~n', [VisibleSpeaker, StatementText]),
-    format('  ~w的日志: ~w~n', [VisibleAI, LoggedText]),
-    format('  评估: ~w (信任 ~w -> ~w)~n', [DeltaText, Current, New]).
+    (Outcome \= missing ->
+        format_statement(Speaker, Round, Room, StatedOthers, StatementText),
+        visible_name(AI, VisibleAI),
+        visible_name(Speaker, VisibleSpeaker),
+        format_log_snapshot(Round, Room, Logged, LoggedText),
+        trust_outcome_text(Outcome, DeltaText),
+        format('  Statement by ~w: ~w~n', [VisibleSpeaker, StatementText]),
+        format('  Log of ~w: ~w~n', [VisibleAI, LoggedText]),
+        format('  Evaluation: ~w (Trust ~w -> ~w)~n', [DeltaText, Current, New])
+    ; true).
 
-format_log_snapshot(_, _, none, '无对应日志').
+format_log_snapshot(_, _, none, 'No corresponding log').
 format_log_snapshot(Round, Room, Others, Text) :-
     display_names(Others, VisibleOthers),
     atomic_list_concat(VisibleOthers, ',', OthersText),
-    format(string(Text), '第~w轮在~w看到~w', [Round, Room, OthersText]).
+    format(string(Text), 'Saw ~w in ~w at round ~w', [OthersText, Room, Round]).
 
-trust_outcome_text(match, '记录匹配，信任+10').
-trust_outcome_text(conflict, '记录冲突，信任-10').
-trust_outcome_text(missing, '未记录，信任不变').
+trust_outcome_text(match, 'Match (+10 trust)').
+trust_outcome_text(conflict, 'Conflict (-10 trust)').
+trust_outcome_text(missing, 'No record (No change)').
 
 run_votes :-
     retractall(vote(_,_)),
     (alive(player) -> player_vote ; true),
     ai_votes,
+    print_vote_matrix,
     tally_votes.
+
+print_vote_matrix :-
+    write('--- Vote Matrix (Row votes for Column) ---'), nl,
+    findall(C, alive(C), Chars),
+    % Header row
+    write('           '),
+    forall(member(C, Chars), (
+        visible_name(C, Name),
+        format('~|~w~t~10+', [Name])
+    )),
+    format('~|~w~t~10+', ['Abstain']),
+    nl,
+    % Data rows
+    forall(member(Voter, Chars), (
+        visible_name(Voter, VName),
+        format('~|~w~t~10+|', [VName]),
+        (vote(Voter, Target) -> true ; Target = unknown),
+        forall(member(Candidate, Chars), (
+            (Target == Candidate -> write('    X     ')
+            ; write('    -     ')
+            )
+        )),
+        (Target == abstain -> write('    X     ') ; write('    -     ')),
+        nl
+    )),
+    nl.
 
 player_vote :-
     write('Cast your vote (atom ending with period). alive characters: '),
     alive_rabbits(Rs), display_names(Rs, Visible), write(Visible),nl,
     read(V),
-    (resolve_target(V, Target), alive(Target), Target \= player -> assertz(vote(player,Target)) ; write('Abstain.'),nl).
+    (   (V = vote(T) -> Target = T ; Target = V), % Support vote(X) or just X
+        alive(Target), Target \= player 
+    ->  assertz(vote(player,Target)) 
+    ;   write('Abstain.'),nl, assertz(vote(player, abstain))
+    ).
 
 ai_votes :-
     forall((alive(AI), AI \= player), ai_single_vote(AI)).
@@ -640,11 +936,8 @@ ai_single_vote(AI) :-
     ).
 
 rabbit_vote(AI, Candidates) :-
-    (   unique_lowest_trust_target(AI, Candidates, Vote)
-    ->  record_vote(AI, Vote)
-    ;   visible_name(AI, VisibleAI),
-        format('~w弃权。~n', [VisibleAI])
-    ).
+    select_vote_by_trust(AI, Candidates, Vote),
+    record_vote(AI, Vote).
 
 unique_lowest_trust_target(AI, Candidates, Vote) :-
     findall(score(T,Score), (member(T, Candidates), (trust(AI, T, Score) -> true ; Score = 100)), Scores),
@@ -656,11 +949,14 @@ unique_lowest_trust_target(AI, Candidates, Vote) :-
     list_to_set(LowestTargets, UniqueLowest),
     UniqueLowest = [Vote].
 
+matches_score(Min, score(_,Score)) :- Score =:= Min.
+
+record_vote(AI, abstain) :-
+    assertz(vote(AI, abstain)).
+
 record_vote(AI, Vote) :-
-    assertz(vote(AI, Vote)),
-    visible_name(AI, VisibleAI),
-    visible_name(Vote, VisibleVote),
-    format('~w votes for ~w.~n',[VisibleAI,VisibleVote]).
+    Vote \= abstain,
+    assertz(vote(AI, Vote)).
 
 alive_targets_for_vote(AI, Candidates) :-
     findall(T, (alive(T), T \= AI), Candidates).
@@ -670,16 +966,40 @@ random_vote(Candidates, Vote) :-
     random_member(Vote, Candidates).
 
 select_vote_by_trust(AI, Candidates, Vote) :-
-    findall(score(T,Score), (member(T, Candidates), trust(AI, T, Score)), Scores),
+    findall(score(T,Score), (member(T, Candidates), trust(AI, T, Score)), AllScores),
+    % Filter out highly trusted targets (e.g. > 150)
+    include(low_trust_target, AllScores, Scores),
     (   Scores = []
-    ->  random_vote(Candidates, Vote)
-    ;   findall(Sc, member(score(_,Sc), Scores), AllScores),
-        min_list(AllScores, Min),
-        include(matches_score(Min), Scores, Lowest),
-        random_member(score(Vote,_), Lowest)
+    ->  Vote = abstain % If everyone is trusted, abstain
+    ;   findall(S, member(score(_,S), Scores), Values),
+        max_list(Values, Max),
+        min_list(Values, Min),
+        Diff is Max - Min,
+        (   Diff =< 15
+        ->  Vote = abstain
+        ;   weighted_vote(Scores, Vote)
+        )
     ).
 
-matches_score(Min, score(_,Score)) :- Score =:= Min.
+low_trust_target(score(_, Score)) :- Score < 150.
+
+weighted_vote(Scores, Vote) :-
+    findall(S, member(score(_,S), Scores), Values),
+    max_list(Values, Max),
+    maplist(calc_weight(Max), Scores, Weighted),
+    foldl(sum_weight, Weighted, 0, TotalWeight),
+    random(0.0, TotalWeight, R),
+    pick_weighted(Weighted, R, Vote).
+
+calc_weight(Max, score(T,S), w(T,W)) :-
+    W is Max - S + 10. % Lower score -> Higher weight
+
+sum_weight(w(_,W), Acc, NewAcc) :- NewAcc is Acc + W.
+
+pick_weighted([w(T,_)|_], R, T) :- R =< 0, !.
+pick_weighted([w(T,W)|Rest], R, Vote) :-
+    R1 is R - W,
+    (R1 =< 0 -> Vote = T ; pick_weighted(Rest, R1, Vote)).
 
 tally_votes :-
     findall(Target, vote(_,Target), Targets),
@@ -687,10 +1007,12 @@ tally_votes :-
     (Counts = [] -> write('No votes.'),nl ;
         keysort(Counts,Sorted), reverse(Sorted, [Count-Target|_]),
         vote_threshold(Threshold),
-        (   Count >= Threshold
-        ->  eliminate(Target)
-        ;   format('投票未通过，需要至少~w票。~n', [Threshold])
-        )).
+    (   Count >= Threshold, Target \= abstain
+    ->  eliminate(Target)
+    ;   Target == abstain
+    ->  format('Vote result: Abstain (~w votes). No one ejected.~n', [Count])
+    ;   format('Vote failed. Requires at least ~w votes.~n', [Threshold])
+    )).
 
 vote_threshold(Threshold) :-
     findall(Char, alive(Char), Alive),
@@ -719,7 +1041,7 @@ eliminate(Target) :-
 update_meeting_timer :-
     retractall(next_meeting(_)),
     round_counter(R),
-    NM is R + 3,
+    NM is R + 4,
     retractall(next_meeting(_)),
     assertz(next_meeting(NM)),
     retractall(vote(_,_)),
@@ -732,11 +1054,19 @@ clear_bodies :-
 
 tick_world :-
     decrement_cooldowns,
+    display_map,
+    print_action_logs,
     round_counter(R),
     R1 is R+1,
     retract(round_counter(_)),
     assertz(round_counter(R1)),
     print_round(R1).
+
+print_action_logs :-
+    write('Activity Log:'), nl,
+    forall(action_log(Msg), format('  ~w', [Msg])),
+    retractall(action_log(_)),
+    nl.
 
 print_round(R) :-
     format('--- Round ~w ---~n', [R]).
@@ -778,16 +1108,19 @@ row_separator(CellCount, CellWidth, Separator) :-
     atomic_list_concat(['+', Body, '+'], Separator).
 
 render_row(Cells, Width, Lines) :-
-    Cells = [FirstCell|_],
-    length(FirstCell, CellHeight),
-    numlist(1, CellHeight, Indexes),
+    maplist(length, Cells, Heights),
+    max_list(Heights, MaxHeight),
+    numlist(1, MaxHeight, Indexes),
     maplist(row_line(Cells, Width), Indexes, Lines).
 
 row_line(Cells, Width, Index, Line) :-
-    maplist(nth1(Index), Cells, Texts),
+    maplist(get_cell_line(Index), Cells, Texts),
     maplist(pad_cell(Width), Texts, Padded),
     atomic_list_concat(Padded, '|', Body),
     atomic_list_concat(['|', Body, '|'], Line).
+
+get_cell_line(Index, CellLines, Line) :-
+    (nth1(Index, CellLines, Line) -> true ; Line = "").
 
 pad_cell(Width, Text, Padded) :-
     string_length(Text, Len),
@@ -800,7 +1133,7 @@ repeat_char(N, Char, String) :-
     maplist(=(Char), Chars),
     atomics_to_string(Chars, '', String).
 
-cell_display(Room, [RoomLine, TaskLine]) :-
+cell_display(Room, Lines) :-
     room_label(Room, Label),
     player_hint(Room, PH),
     task_hint(Room, TH),
@@ -809,21 +1142,47 @@ cell_display(Room, [RoomLine, TaskLine]) :-
     ->  RoomLine = Label
     ;   atomics_to_string([Label|Hints], ' ', RoomLine)
     ),
-    room_tasks_line(Room, TaskLine).
+    
+    (   show_tasks_on_map(true)
+    ->  room_tasks_line(Room, TaskLine), Tasks = [TaskLine]
+    ;   Tasks = []
+    ),
+
+    room_characters_line(Room, CharLine),
+    (   CharLine == ""
+    ->  Chars = []
+    ;   Chars = [CharLine]
+    ),
+    
+    append([ [RoomLine], Tasks, Chars ], Lines).
+
+room_characters_line(Room, Line) :-
+    show_rabbits_on_map(ShowRabbits),
+    findall(S, (
+        location(B,Room), alive(B),
+        (   role(B, detective)
+        ->  S = "Det"
+        ;   ShowRabbits == true, role(B, rabbit)
+        ->  visible_name(B,N),
+            (atom_concat(bunny,R,N) -> atom_concat('R',R,S) ; S=N)
+        )
+    ), L),
+    (L=[] -> Line="" ; atomics_to_string(L,',',S), format(string(Line),"Chars: ~w",[S])).
 
 room_label(Room, Label) :- atom_string(Room, Label).
 
 player_hint(Room, "(You)") :- location(player, Room), !.
 player_hint(_, "").
 
-task_hint(Room, "(Finished)") :- task(_,Room,_,_,complete,_), !.
 task_hint(_, "").
 
 room_tasks_line(Room, Line) :-
     findall(Display,
-        ( task(TaskName,Room,_,_,Status,_),
-          task_status_label(Status, StatusLabel),
-          format(string(Display), "~w~w", [TaskName, StatusLabel])
+        ( task(TaskName,Room,Total,Rem,Status,_),
+          (Status == complete -> Label = " (done)"
+          ; Done is Total - Rem,
+            format(string(Label), " (~w/~w)", [Done, Total])),
+          format(string(Display), "~w~w", [TaskName, Label])
         ),
         Tasks),
     (   Tasks = []
@@ -841,9 +1200,11 @@ decrement_cooldowns :-
         retract(cooldown(Char,Skill,CD)),
         assertz(cooldown(Char,Skill,New))
     )),
+    % Clean up tasks if owner is dead, but do NOT auto-progress tasks here
+    % (Tasks are progressing in ai_act_logic -> attempt_task)
     forall(task(T,R,N,Rem,in_progress,Occ), (
         (   alive(Occ)
-        ->  progress_task(T,R,Occ)
+        ->  true
         ;   retract(task(T,R,N,Rem,in_progress,Occ)),
             assertz(task(T,R,N,Rem,available,none))
         )
@@ -862,7 +1223,7 @@ execute_plan_step(detective) :-
     (Plan = [Action|_] -> apply_action(detective, Action) ; true).
 
 plan_for_detective(Plan) :-
-    (run_pyperplan(Plan) -> true ; default_plan(Plan)).
+    default_plan(Plan).
 
 default_plan([
     move(detective,'Hall'),
@@ -876,25 +1237,95 @@ apply_action(_,inspect(Target)) :-
     inspect_identity(Target).
 
 run_pyperplan(Plan) :-
-    catch(shell('python3 -m pyperplan adversary_domain.pddl adversary_problem.pddl > plan.txt'),_,fail),
-    (exists_file('plan.txt') -> read_plan_file('plan.txt',Plan) ; fail).
+    % Clean up old solution file
+    (exists_file('adversary_problem.pddl.soln') -> delete_file('adversary_problem.pddl.soln') ; true),
+    % Use GBF search with FF heuristic for speed (suboptimal but fast)
+    % pyperplan writes solution to <problem_file>.soln
+    catch(shell('python3 -m pyperplan -s gbf -H hff adversary_domain.pddl adversary_problem.pddl > plan.txt'),_,fail),
+    (exists_file('adversary_problem.pddl.soln') -> read_plan_file('adversary_problem.pddl.soln',Plan) ; fail).
+
+% Dynamic PDDL Problem Generator
+generate_pddl_problem(Target) :-
+    open('adversary_problem.pddl', write, Stream),
+    write(Stream, '(define (problem tufox-instance)\n'),
+    write(Stream, '  (:domain tufox)\n'),
+    write(Stream, '  (:objects\n'),
+    write(Stream, '    detective player bunny1 bunny2 bunny3 bunny4 - agent\n'),
+    rooms(Rooms),
+    forall(member(R, Rooms), (
+        normalize_room_name(R, RName),
+        format(Stream, '    ~w', [RName])
+    )),
+    write(Stream, ' - room\n  )\n'),
+    
+    write(Stream, '  (:init\n'),
+    write(Stream, '    (alive detective)\n'),
+    write(Stream, '    (is-detective detective)\n'),
+    
+    % Write state for all alive agents
+    forall((alive(A), A \= detective), (
+        format(Stream, '    (alive ~w)\n', [A]),
+        location(A, Loc),
+        normalize_room_name(Loc, LocName),
+        format('DEBUG: PDDL Gen - ~w at ~w (~w)~n', [A, Loc, LocName]), % DEBUG
+        format(Stream, '    (at ~w ~w)\n', [A, LocName]),
+        (inspected(A) -> true ; format(Stream, '    (not-inspected ~w)\n', [A]))
+    )),
+    
+    location(detective, DetRoom),
+    normalize_room_name(DetRoom, DetRoomName),
+    format('DEBUG: PDDL Gen - Detective at ~w (~w)~n', [DetRoom, DetRoomName]), % DEBUG
+    format(Stream, '    (at detective ~w)\n', [DetRoomName]),
+    
+    % Explicitly iterate over all rooms to generate connections
+    forall(member(R, Rooms), (
+        forall(path(R, Adj), (
+            normalize_room_name(R, RN),
+            normalize_room_name(Adj, AN),
+            format(Stream, '    (connected ~w ~w)\n', [RN, AN])
+        ))
+    )),
+    write(Stream, '  )\n'),
+    
+    format(Stream, '  (:goal (inspected ~w))\n', [Target]),
+    write(Stream, ')\n'),
+    close(Stream).
+
+normalize_room_name(Atom, Normalized) :-
+    atom_string(Atom, Str),
+    string_lower(Str, Lower),
+    split_string(Lower, " ", "_", Parts),
+    atomic_list_concat(Parts, '_', Normalized).
 
 read_plan_file(File, Plan) :-
     open(File,read,Stream),
     read_lines(Stream, Lines),
     close(Stream),
-    maplist(parse_action, Lines, Plan).
+    % Use convlist to filter out lines that fail to parse (e.g. logs or empty lines)
+    convlist(parse_action, Lines, Plan).
 
 read_lines(Stream, []) :- at_end_of_stream(Stream), !.
 read_lines(Stream, [L|Ls]) :-
     read_line_to_codes(Stream, Codes), atom_codes(A,Codes), atom_string(A,S), normalize_space(string(L),S),
     read_lines(Stream, Ls).
 
-parse_action(Line, move(detective,Room)) :-
-    sub_atom(Line,_,_,_, 'move'),
-    atomic_list_concat(['(', 'move', detective, RoomAtom, ')' ], ' ', Line),
-    room_from_plan_atom(RoomAtom, Room).
-parse_action(_, inspect(player)).
+parse_action(Line, Action) :-
+    % Remove parentheses if present
+    (sub_string(Line, 0, 1, _, "(") -> 
+        sub_string(Line, 1, _, 1, Content) 
+    ; Content = Line),
+    % Use split_string to handle multiple spaces robustly
+    split_string(Content, " ", " ", StringTokens),
+    maplist(atom_string, Tokens, StringTokens),
+    (   parse_tokens(Tokens, Action)
+    ->  true
+    ;   format('DEBUG: Failed to parse action line: "~w" (Tokens: ~w)~n', [Line, Tokens]), fail
+    ).
+
+parse_tokens(['move', 'detective', _, ToRoomAtom], move(detective, Room)) :-
+    room_from_plan_atom(ToRoomAtom, Room).
+parse_tokens(['inspect', 'detective', TargetAtom, _], inspect(Target)) :-
+    atom_string(Target, TargetAtom).
 
 room_from_plan_atom(RoomAtom, Room) :-
     atom_string(RoomAtom, PlanString),
